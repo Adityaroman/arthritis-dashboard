@@ -10,6 +10,10 @@ import plotly.graph_objects as go
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.preprocessing import LabelEncoder
 import os
+import io
+import base64
+import matplotlib.pyplot as plt
+import seaborn as sns
 
 # --- Configuration ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -41,7 +45,6 @@ def generate_and_prepare_data():
     logging.info("Training model and preparing data...")
     
     # Feature Engineering & Encoding
-    df['year'] = df['date'].dt.year
     df['month'] = df['date'].dt.month
     df['dayofyear'] = df['date'].dt.dayofyear
     
@@ -51,7 +54,7 @@ def generate_and_prepare_data():
         df[col + '_encoded'] = le.fit_transform(df[col])
         encoders[col] = le
 
-    features = ['year', 'month', 'dayofyear', 'location_encoded', 'age_group_encoded', 'gender_encoded', 'severity']
+    features = ['month', 'dayofyear', 'location_encoded', 'age_group_encoded', 'gender_encoded', 'severity']
     target = 'cases'
     
     X = df[features]
@@ -116,6 +119,10 @@ app.layout = html.Div(style={'padding': '20px', 'backgroundColor': '#f4f6f9'}, c
                     dcc.Tab(label='Severity Analysis', value='tab-severity', children=[
                         dcc.Graph(id='severity-scatterplot', style={'marginTop': '20px'})
                     ]),
+                    dcc.Tab(label='Correlation Heatmap', value='tab-correlation', children=[
+                        # The seaborn plot will be displayed here as an image
+                        html.Img(id='correlation-heatmap', style={'width': '100%', 'marginTop': '20px'})
+                    ]),
                 ]),
             ])
         ])
@@ -132,23 +139,30 @@ def update_prediction(n_clicks, location, age, gender, severity):
     if n_clicks == 0: return ""
     today = datetime.now()
     input_data = {
-        'year': [today.year], 'month': [today.month], 'dayofyear': [today.timetuple().tm_yday],
+        'month': [today.month], 'dayofyear': [today.timetuple().tm_yday],
         'location_encoded': [data_encoders['location'].transform([location])[0]],
         'age_group_encoded': [data_encoders['age_group'].transform([age])[0]],
         'gender_encoded': [data_encoders['gender'].transform([gender])[0]],
         'severity': [severity]
     }
+    # We need to add the 'year' column for the model, even if it's not used in the prediction logic itself
+    input_data['year'] = today.year
+    
     input_df = pd.DataFrame(input_data)
+    # Ensure columns are in the same order as during training
+    input_df = input_df[['year', 'month', 'dayofyear', 'location_encoded', 'age_group_encoded', 'gender_encoded', 'severity']]
+
     predicted_cases = model.predict(input_df)[0]
     return f"Predicted Cases: {int(predicted_cases)}"
 
 @app.callback(
-    [Output('metrics-container', 'children'), Output('age-barchart', 'figure'), Output('gender-piechart', 'figure'), Output('severity-scatterplot', 'figure')],
+    [Output('metrics-container', 'children'), Output('age-barchart', 'figure'), Output('gender-piechart', 'figure'), Output('severity-scatterplot', 'figure'), Output('correlation-heatmap', 'src')],
     Input('filter-location', 'value')
 )
 def update_charts_and_metrics(location):
     filtered_df = processed_data if location == 'All' else processed_data[processed_data['location'] == location]
     
+    # --- Calculate Metrics ---
     total_cases = filtered_df['cases'].sum()
     avg_cases_day = filtered_df.groupby('date')['cases'].sum().mean()
     location_risk = processed_data.groupby('location')['cases'].sum().idxmax()
@@ -160,6 +174,7 @@ def update_charts_and_metrics(location):
         html.Div([html.H5("Highest Risk Location"), html.P(location_risk)], style=metric_style),
     ])
 
+    # --- Generate Plotly Charts ---
     age_df = filtered_df.groupby('age_group')['cases'].sum().reset_index()
     bar_fig = px.bar(age_df, x='age_group', y='cases', title='Cases by Age Group', labels={'age_group': 'Age Group', 'cases': 'Total Cases'}, color_discrete_sequence=['#2980b9'])
     
@@ -170,8 +185,26 @@ def update_charts_and_metrics(location):
 
     for fig in [bar_fig, pie_fig, scatter_fig]:
         fig.update_layout(title_x=0.5, margin=dict(l=40, r=20, t=40, b=20))
+        
+    # --- Generate Seaborn Heatmap ---
+    # Select only numeric columns for correlation
+    corr_df = filtered_df[['cases', 'severity', 'month', 'dayofyear']].corr()
+    
+    # Create a matplotlib figure
+    fig, ax = plt.subplots(figsize=(8, 6))
+    sns.heatmap(corr_df, annot=True, cmap='viridis', ax=ax, fmt='.2f')
+    ax.set_title('Correlation Matrix of Numeric Features')
+    
+    # Save it to a temporary buffer.
+    buf = io.BytesIO()
+    fig.savefig(buf, format='png')
+    plt.close(fig) # Close the figure to free memory
+    
+    # Embed the result in the html output.
+    data = base64.b64encode(buf.getbuffer()).decode("utf8")
+    heatmap_src = "data:image/png;base64,{}".format(data)
 
-    return metrics, bar_fig, pie_fig, scatter_fig
+    return metrics, bar_fig, pie_fig, scatter_fig, heatmap_src
 
 # --- Run the App ---
 if __name__ == '__main__':
